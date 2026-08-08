@@ -27,9 +27,9 @@
  * Enable tracing with LINUWUX_DEBUG=1.
  *
  * On branch dev/sigsys-rax18-log:
- *  - when rax==0x18 is redirected, dump a fuller register snapshot
- *  - set LINUWUX_SKIP_RAX18=1 to skip the trampoline for 0x18 only (Wine
- *    handles SIGSYS as usual) while still logging DETAIL — A/B for BL4 1.9
+ *  - rax==0x18: full DETAIL dump before route/skip
+ *  - LINUWUX_SKIP_RAX18=1: do not trampoline a wider hot set
+ *    (0x18, 0x28, 0x2a, 0x43, 0xf) — Wine handles those SIGSYSs instead
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -297,23 +297,38 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
     return 1;
 }
 
+/* Hot set from BL4 1.9 redirect histogram; only used when SKIP env is set. */
+static int linuwux_skip_syscall(unsigned long long nr)
+{
+    const char *env = getenv("LINUWUX_SKIP_RAX18");
+
+    if (!env || env[0] != '1' || env[1] != '\0')
+        return 0;
+
+    switch (nr) {
+    case 0x18: /* NtAllocateVirtualMemory */
+    case 0x28:
+    case 0x2a:
+    case 0x43:
+    case 0xf:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* Returns 1 if sigsys_handler should return immediately. */
 static int linuwux_sigsys_route(void *sigcontext)
 {
     ucontext_t *ctx = sigcontext;
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
     unsigned long long syscall_nr;
-    const char *skip_rax18;
 
     if (TargetSysHandler != 0 &&
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
         syscall_nr = (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX];
 
-        /*
-         * BL4 1.9 often AVs (execute @ 0x225FF) immediately after a
-         * redirected NtAllocateVirtualMemory (Windows syscall 0x18).
-         * Dump the full pre-trampoline register picture for those only.
-         */
+        /* Full snapshot only for the original 0x18 suspect. */
         if (syscall_nr == 0x18) {
             linuwux_log("sigsys rax=0x18 DETAIL pre-route:\n");
             linuwux_log("  rip=%llx rsp=%llx rbp=%llx\n",
@@ -342,16 +357,16 @@ static int linuwux_sigsys_route(void *sigcontext)
             linuwux_log("  xmm4(lo)=%llx xmm5(lo)=%llx (bypass magic check already passed)\n",
                         (unsigned long long)(xmm_regs[4] & 0xFFFFFFFFFFFFFFFF),
                         (unsigned long long)(xmm_regs[5] & 0xFFFFFFFFFFFFFFFF));
+        }
 
-            /*
-             * Optional A/B: do not hand 0x18 to TargetSysHandler; let Wine
-             * finish SIGSYS as usual. Set LINUWUX_SKIP_RAX18=1 to enable.
-             */
-            skip_rax18 = getenv("LINUWUX_SKIP_RAX18");
-            if (skip_rax18 && skip_rax18[0] == '1' && skip_rax18[1] == '\0') {
-                linuwux_log("sigsys rax=0x18 SKIP redirect (LINUWUX_SKIP_RAX18=1)\n");
-                return 0;
-            }
+        /*
+         * Optional A/B: skip trampoline for the hot set; Wine finishes SIGSYS.
+         * Same env name as before (LINUWUX_SKIP_RAX18=1).
+         */
+        if (linuwux_skip_syscall(syscall_nr)) {
+            linuwux_log("sigsys rax=%llx SKIP redirect (LINUWUX_SKIP_RAX18=1, wide set)\n",
+                        syscall_nr);
+            return 0;
         }
 
         linuwux_log("sigsys redirect rax=%llx → TargetSysHandler=%p\n",
