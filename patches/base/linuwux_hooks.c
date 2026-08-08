@@ -26,9 +26,10 @@
  *
  * Enable tracing with LINUWUX_DEBUG=1.
  *
- * On branch dev/sigsys-rax18-log: when rax==0x18 (NtAllocateVirtualMemory) is
- * redirected, dump a fuller register snapshot to help diagnose BL4 1.9's
- * execute@0x225FF crash that often follows those redirects.
+ * On branch dev/sigsys-rax18-log:
+ *  - when rax==0x18 is redirected, dump a fuller register snapshot
+ *  - set LINUWUX_SKIP_RAX18=1 to skip the trampoline for 0x18 only (Wine
+ *    handles SIGSYS as usual) while still logging DETAIL — A/B for BL4 1.9
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -302,14 +303,11 @@ static int linuwux_sigsys_route(void *sigcontext)
     ucontext_t *ctx = sigcontext;
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
     unsigned long long syscall_nr;
+    const char *skip_rax18;
 
     if (TargetSysHandler != 0 &&
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
         syscall_nr = (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX];
-
-        /* Quiet one-liner for normal redirects. */
-        linuwux_log("sigsys redirect rax=%llx → TargetSysHandler=%p\n",
-                    syscall_nr, (void *)TargetSysHandler);
 
         /*
          * BL4 1.9 often AVs (execute @ 0x225FF) immediately after a
@@ -344,7 +342,20 @@ static int linuwux_sigsys_route(void *sigcontext)
             linuwux_log("  xmm4(lo)=%llx xmm5(lo)=%llx (bypass magic check already passed)\n",
                         (unsigned long long)(xmm_regs[4] & 0xFFFFFFFFFFFFFFFF),
                         (unsigned long long)(xmm_regs[5] & 0xFFFFFFFFFFFFFFFF));
+
+            /*
+             * Optional A/B: do not hand 0x18 to TargetSysHandler; let Wine
+             * finish SIGSYS as usual. Set LINUWUX_SKIP_RAX18=1 to enable.
+             */
+            skip_rax18 = getenv("LINUWUX_SKIP_RAX18");
+            if (skip_rax18 && skip_rax18[0] == '1' && skip_rax18[1] == '\0') {
+                linuwux_log("sigsys rax=0x18 SKIP redirect (LINUWUX_SKIP_RAX18=1)\n");
+                return 0;
+            }
         }
+
+        linuwux_log("sigsys redirect rax=%llx → TargetSysHandler=%p\n",
+                    syscall_nr, (void *)TargetSysHandler);
 
         xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
