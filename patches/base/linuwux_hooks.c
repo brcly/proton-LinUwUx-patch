@@ -25,6 +25,10 @@
  * protocol, etc.) without dumping a large blob into the signal file itself.
  *
  * Enable tracing with LINUWUX_DEBUG=1.
+ *
+ * On branch dev/sigsys-rax18-log: when rax==0x18 (NtAllocateVirtualMemory) is
+ * redirected, dump a fuller register snapshot to help diagnose BL4 1.9's
+ * execute@0x225FF crash that often follows those redirects.
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -297,12 +301,51 @@ static int linuwux_sigsys_route(void *sigcontext)
 {
     ucontext_t *ctx = sigcontext;
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
+    unsigned long long syscall_nr;
 
     if (TargetSysHandler != 0 &&
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
+        syscall_nr = (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX];
+
+        /* Quiet one-liner for normal redirects. */
         linuwux_log("sigsys redirect rax=%llx → TargetSysHandler=%p\n",
-                    (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX],
-                    (void *)TargetSysHandler);
+                    syscall_nr, (void *)TargetSysHandler);
+
+        /*
+         * BL4 1.9 often AVs (execute @ 0x225FF) immediately after a
+         * redirected NtAllocateVirtualMemory (Windows syscall 0x18).
+         * Dump the full pre-trampoline register picture for those only.
+         */
+        if (syscall_nr == 0x18) {
+            linuwux_log("sigsys rax=0x18 DETAIL pre-route:\n");
+            linuwux_log("  rip=%llx rsp=%llx rbp=%llx\n",
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RSP],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RBP]);
+            linuwux_log("  rax=%llx rbx=%llx rcx=%llx rdx=%llx\n",
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RBX],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RCX],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RDX]);
+            linuwux_log("  rsi=%llx rdi=%llx r8=%llx  r9=%llx\n",
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RSI],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_RDI],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R8],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R9]);
+            linuwux_log("  r10=%llx r11=%llx r12=%llx r13=%llx\n",
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R10],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R11],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R12],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R13]);
+            linuwux_log("  r14=%llx r15=%llx TargetSysHandler=%p\n",
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R14],
+                        (unsigned long long)ctx->uc_mcontext.gregs[REG_R15],
+                        (void *)TargetSysHandler);
+            linuwux_log("  xmm4(lo)=%llx xmm5(lo)=%llx (bypass magic check already passed)\n",
+                        (unsigned long long)(xmm_regs[4] & 0xFFFFFFFFFFFFFFFF),
+                        (unsigned long long)(xmm_regs[5] & 0xFFFFFFFFFFFFFFFF));
+        }
+
         xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
         ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
